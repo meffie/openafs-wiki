@@ -1,0 +1,176 @@
+#!/usr/bin/perl -w
+# Copyright (c) 2014, Sine Nomine Associates
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+=head1 NAME
+
+spamcheck
+
+=head1 SYNOPSIS
+
+spamcheck [--whitelist|-w <file>] [--found|-f] [--verbose|-v] [--help|-h] [<file> ...]
+
+=head1 DESCRIPTION
+
+B<spamcheck> searches markdown files for links to sites which are not
+whitelisted.
+
+=head1 OPTIONS
+
+=over 8
+
+=item --whitelist|-w <file>
+
+url whitelist file
+
+=item --found|-f
+
+Print linked sites.
+
+=item --verbose|-v
+
+Print more information while checking files.
+
+=item --help|-h
+
+Print help and exit
+
+=item <file>
+
+One or more markdown files to check. If <file> is not given,
+B<spamcheck> searches the current directory and sub-directories
+for files ending with C<.mdwn> or C<.md>.
+
+=back
+
+=cut
+
+use Getopt::Long;
+use Pod::Usage;
+use File::Find;
+use Text::Markdown::Discount;
+use XML::LibXML;
+
+my $opt_whitelist = "whitelist.txt";
+my $opt_verbose = 0;
+my $opt_found = 0;
+my $opt_help = 0;
+GetOptions(
+    "whitelist|w=s" => \$opt_whitelist,
+    "found|u" => \$opt_found,
+    "verbose|v" => \$opt_verbose,
+    "help|h|?" => \$opt_help,
+) or pod2usage(2);
+if ($opt_help) {
+    pod2usage(1);
+}
+
+my %whitelist = ();
+my %urls = ();
+my @invalid = ();
+my @suspect = ();
+
+read_whitelist();
+spam_check_files(@ARGV);
+
+#-------------------------------------------------------------
+# Read the whitelist file.
+#
+sub read_whitelist
+{
+    open(my $fh, "< $opt_whitelist") or
+        die "failed open whitelist file: $opt_whitelist: $!\n";
+    while (<$fh>) {
+        chomp;
+        next if /^\s*#/;
+        s/^\s*//;
+        s/\s*$//;
+        $whitelist{$_} = 1;
+    }
+    close $fh;
+}
+
+#-------------------------------------------------------------
+# Process markdown files.
+#
+sub spam_check_files
+{
+    if (@_) {
+        # check the given files
+        foreach my $arg (@_) {
+            spam_check_file($arg);
+        }
+    } else {
+        # check all the markdown files (recursive)
+        my $f = {
+            no_chdir => 1,
+            wanted => sub {
+                spam_check_file($_) if /\.(mdwn|md)$/;
+            },
+        };
+        find($f, ("."));
+    }
+    if (@invalid) {
+        warn "\n*** HTML errors ***\n", join("\n", @invalid), "\n";
+    }
+    if (@suspect) {
+        warn "\n*** Possible Spam ***\n", join("\n", @suspect), "\n";
+    }
+    if ($opt_found) {
+        print join("\n", sort(keys(%sites))), "\n";
+    }
+    return 0;
+}
+
+#-------------------------------------------------------------
+# Read the markdown, convert to html, and extract the links.
+#
+sub spam_check_file
+{
+    my $filename = shift;
+
+    $filename =~ s{^\./}{}; # trim the leading dot from find
+    print "checking file $filename\n" if $opt_verbose;
+
+    open(my $fh, "< $filename") or die "cant open file $filename: $?\n";
+    my $markdown = join("", <$fh>);
+    close($fh);
+
+    my $html = Text::Markdown::Discount::markdown($markdown);
+    eval {
+        my $doc = XML::LibXML->load_html(string => $html);
+        for my $anchor ($doc->findnodes("//a[\@href]")) {
+            my $href = $anchor->getAttribute("href");
+            if ($href =~ m{^(https?://[^/]+)}) {
+                my $site = $1;
+                $sites{$site} = 1;
+                unless (exists($whitelist{$site})) {
+                    push(@suspect, "$filename $href");
+                    if ($opt_verbose) {
+                        warn "WARNING: $filename $href\n";
+                    }
+                }
+            }
+        }
+    };
+    if ($@) {
+        push(@invalid, $filename);
+        if ($opt_verbose) {
+            warn "HTML error while processing file $filename\n";
+            warn "$@\n";
+        }
+        return 1;
+    }
+}
+
